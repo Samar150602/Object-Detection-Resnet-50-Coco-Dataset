@@ -4,11 +4,15 @@ from torchvision.models.detection import FasterRCNN
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
 from torchvision import transforms
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, random_split
 from torchvision.datasets import CocoDetection
 from PIL import Image, ImageDraw
-import random
 import numpy as np
+import os
+import random
+
+# Ensure output directory exists
+os.makedirs("output", exist_ok=True)
 
 # COCO class names (from COCO dataset)
 COCO_INSTANCE_CATEGORY_NAMES = [
@@ -29,17 +33,27 @@ transform = transforms.Compose([
 ])
 
 # Load the validation dataset
+print("Loading validation dataset...")
 val_dataset_full = CocoDetection(
-    root='D:/DeelLearning/Computer-Vision-ResNet-Object-Detector/val2014__',
-    annFile='D:/DeelLearning/Computer-Vision-ResNet-Object-Detector/annotations__/instances_val2014.json',
+    root='./val2014__',
+    annFile='./annotations__/instances_val2014.json',
     transform=transform
 )
 
-# Use a subset of the validation dataset for demonstration
-random.seed(42)
-subset_percentage = 0.01  # Use 1% of the dataset for testing
-val_indices = random.sample(range(len(val_dataset_full)), int(len(val_dataset_full) * subset_percentage))
-val_dataset = Subset(val_dataset_full, val_indices)
+# Randomly sample 1% of the dataset
+def get_random_subset(dataset, subset_percentage=0.01):
+    """
+    Get a random subset of the dataset.
+    Args:
+        dataset: The full dataset.
+        subset_percentage: The percentage of the dataset to sample.
+    Returns:
+        Subset of the dataset.
+    """
+    subset_size = int(len(dataset) * subset_percentage)
+    return random_split(dataset, [subset_size, len(dataset) - subset_size])[0]
+
+val_dataset = get_random_subset(val_dataset_full)
 
 # Data loader
 def collate_fn(batch):
@@ -122,21 +136,6 @@ def denormalize(tensor, mean, std):
     std = torch.tensor(std).view(3, 1, 1)
     return tensor * std + mean
 
-
-# Function to denormalize an image
-def denormalize(tensor, mean, std):
-    """
-    Denormalize a tensor image.
-    Args:
-        tensor: The input image tensor.
-        mean: Mean values used for normalization (list of 3 values for RGB).
-        std: Standard deviation values used for normalization (list of 3 values for RGB).
-    Returns:
-        Denormalized tensor.
-    """
-    mean = torch.tensor(mean).view(3, 1, 1)
-    std = torch.tensor(std).view(3, 1, 1)
-    return tensor * std + mean
 
 # Perform evaluation and display results
 print("Starting evaluation...")
