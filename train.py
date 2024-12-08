@@ -33,7 +33,7 @@ def main():
 
     # Use a subset of the dataset for faster testing
     random.seed(42)
-    subset_percentage = 0.001
+    subset_percentage = 0.1
     train_indices = random.sample(range(len(train_dataset_full)), int(len(train_dataset_full) * subset_percentage))
     val_indices = random.sample(range(len(val_dataset_full)), int(len(val_dataset_full) * subset_percentage))
 
@@ -84,7 +84,8 @@ def main():
 
     # Training loop
     print("Starting training...")
-    num_epochs = 10  # Reduced for faster execution
+    # Training loop
+    num_epochs = 50  # Set your desired number of epochs
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0
@@ -118,11 +119,21 @@ def main():
             optimizer.step()
             epoch_loss += losses.item()
 
+            # Print progress
             if batch_idx % 10 == 0:
                 print(f"Epoch {epoch + 1}, Batch {batch_idx + 1}/{len(train_loader)}, Loss: {losses.item():.4f}")
 
+        # Save the model after the epoch
+        model_save_path = f"model_epoch_{epoch + 1}.pth"
+        torch.save(model.state_dict(), model_save_path)
+        print(f"Model saved after epoch {epoch + 1} at {model_save_path}")
+
+        # Print epoch loss
         print(f"Epoch {epoch + 1} completed. Total Loss: {epoch_loss:.4f}")
+
+        # Step the learning rate scheduler
         lr_scheduler.step()
+
 
     # Evaluation loop
     print("Starting evaluation...")

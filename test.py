@@ -164,6 +164,7 @@ with torch.no_grad():
 
             processed_image_pil = transforms.ToPILImage()(normalized_image)  # Keep normalized colors
             processed_image_pil = draw_predictions(processed_image_pil, filtered_output)
+            original_image_pil = draw_predictions(original_image_pil, filtered_output)
 
             combined_image = side_by_side(original_image_pil, processed_image_pil)
             combined_image.save(f"output/side_by_side_{batch_idx * 4 + i + 1}.jpg")
