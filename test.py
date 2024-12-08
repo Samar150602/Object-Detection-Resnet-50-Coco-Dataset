@@ -153,27 +153,24 @@ with torch.no_grad():
 
         if batch_idx >= max_eval_batches:
             break
-
         for i, image_tensor in enumerate(images):
-            # Retrieve the normalized image tensor for processing
             normalized_image = image_tensor.cpu()
-
-            # Denormalize the tensor to get the original RGB image
             denormalized_image = denormalize(normalized_image, mean, std).clamp(0, 1)
-
-            # Convert the denormalized image to PIL for the original view
             original_image_pil = transforms.ToPILImage()(denormalized_image)
 
-            # Keep the normalized image for processing
             image_tensor = image_tensor.to(device)
             outputs = model([image_tensor])
             filtered_output = filter_predictions(outputs, threshold=0.01)[0]
 
-            # Create the processed image with bounding boxes on the normalized version
             processed_image_pil = transforms.ToPILImage()(normalized_image)  # Keep normalized colors
             processed_image_pil = draw_predictions(processed_image_pil, filtered_output)
 
-            # Combine original and processed images side by side
             combined_image = side_by_side(original_image_pil, processed_image_pil)
-            combined_image.show()
             combined_image.save(f"output/side_by_side_{batch_idx * 4 + i + 1}.jpg")
+
+            # Log detections in the console
+            print(f"Image {batch_idx * 4 + i + 1}:")
+            for box, label, score in zip(filtered_output['boxes'], filtered_output['labels'], filtered_output['scores']):
+                label_name = COCO_INSTANCE_CATEGORY_NAMES[label.item()]
+                confidence = f"{score.item() * 100:.1f}%"
+                print(f"  Detected: {label_name}, Confidence: {confidence}")
