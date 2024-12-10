@@ -14,7 +14,7 @@ import random
 # Ensure output directory exists
 os.makedirs("output", exist_ok=True)
 
-# COCO class names (from COCO dataset)
+# Use the same COCO class names as in the training code
 COCO_INSTANCE_CATEGORY_NAMES = [
     '__background__', 'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
     'fire hydrant', 'N/A', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant',
@@ -40,20 +40,11 @@ val_dataset_full = CocoDetection(
     transform=transform
 )
 
-# Randomly sample 1% of the dataset
-def get_random_subset(dataset, subset_percentage=0.01):
-    """
-    Get a random subset of the dataset.
-    Args:
-        dataset: The full dataset.
-        subset_percentage: The percentage of the dataset to sample.
-    Returns:
-        Subset of the dataset.
-    """
-    subset_size = int(len(dataset) * subset_percentage)
-    return random_split(dataset, [subset_size, len(dataset) - subset_size])[0]
-
-val_dataset = get_random_subset(val_dataset_full)
+# Use a random subset of the validation dataset
+subset_percentage = 0.01  # 1% for testing
+random.seed(42)
+val_indices = random.sample(range(len(val_dataset_full)), int(len(val_dataset_full) * subset_percentage))
+val_dataset = torch.utils.data.Subset(val_dataset_full, val_indices)
 
 # Data loader
 def collate_fn(batch):
@@ -69,22 +60,19 @@ val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, collate_fn=col
 # Load the saved model
 print("Loading the saved model...")
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-num_classes = 81  # Number of classes in the saved model (80 classes + 1 background)
+num_classes = 81  # Number of classes during training (80 + 1 background)
 
 model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT)
 in_features = model.roi_heads.box_predictor.cls_score.in_features
 model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-model.load_state_dict(torch.load("10_epoch_10_percent.pth", map_location=device))
+model.load_state_dict(torch.load("1_percent_model_epoch_13.pth", map_location=device))
 model.to(device)
 model.eval()
 
 print("Model loaded successfully.")
 
-# Functions for filtering and drawing predictions
-def filter_predictions(outputs, threshold=0.01):
-    """
-    Filter predictions with a confidence score greater than the threshold.
-    """
+# Function to filter predictions with confidence > threshold
+def filter_predictions(outputs, threshold=0.5):
     filtered_outputs = []
     for output in outputs:
         keep = output['scores'] > threshold
@@ -95,53 +83,27 @@ def filter_predictions(outputs, threshold=0.01):
         })
     return filtered_outputs
 
+# Function to draw predictions on the image
 def draw_predictions(image, predictions):
-    """
-    Draw bounding boxes and labels on the image with scores displayed.
-    """
     draw = ImageDraw.Draw(image)
-
     for box, label, score in zip(predictions['boxes'], predictions['labels'], predictions['scores']):
         box = box.tolist()
         label_text = COCO_INSTANCE_CATEGORY_NAMES[label.item()]
-        score_text = f"{score.item() * 100:.1f}%"
-        draw.rectangle(box, outline="red", width=2)
-        draw.text((box[0], box[1]), f"{label_text}: {score_text}", fill="yellow")
-    
+        if label_text != "N/A":  # Skip N/A categories
+            score_text = f"{score.item() * 100:.1f}%"
+            draw.rectangle(box, outline="red", width=2)
+            draw.text((box[0], box[1]), f"{label_text}: {score_text}", fill="yellow")
     return image
-
-def side_by_side(original, output):
-    """
-    Combine original and output images side by side.
-    """
-    combined_width = original.width + output.width
-    combined_height = max(original.height, output.height)
-    combined_image = Image.new("RGB", (combined_width, combined_height))
-    combined_image.paste(original, (0, 0))
-    combined_image.paste(output, (original.width, 0))
-    return combined_image
 
 # Function to denormalize an image
 def denormalize(tensor, mean, std):
-    """
-    Denormalize a tensor image.
-    Args:
-        tensor: The input image tensor.
-        mean: Mean values used for normalization (list of 3 values for RGB).
-        std: Standard deviation values used for normalization (list of 3 values for RGB).
-    Returns:
-        Denormalized tensor.
-    """
     mean = torch.tensor(mean).view(3, 1, 1)
     std = torch.tensor(std).view(3, 1, 1)
     return tensor * std + mean
 
-
-# Perform evaluation and display results
+# Perform evaluation and save results
 print("Starting evaluation...")
-max_eval_batches = 5  # Limit the number of evaluation batches for demonstration
-
-# Normalization parameters used during preprocessing
+max_eval_batches = 5  # Limit the number of batches for testing
 mean = [0.485, 0.456, 0.406]
 std = [0.229, 0.224, 0.225]
 
@@ -153,6 +115,7 @@ with torch.no_grad():
 
         if batch_idx >= max_eval_batches:
             break
+
         for i, image_tensor in enumerate(images):
             normalized_image = image_tensor.cpu()
             denormalized_image = denormalize(normalized_image, mean, std).clamp(0, 1)
@@ -160,16 +123,15 @@ with torch.no_grad():
 
             image_tensor = image_tensor.to(device)
             outputs = model([image_tensor])
-            filtered_output = filter_predictions(outputs, threshold=0.01)[0]
+            filtered_output = filter_predictions(outputs, threshold=0.5)[0]
 
-            processed_image_pil = transforms.ToPILImage()(normalized_image)  # Keep normalized colors
+            processed_image_pil = original_image_pil.copy()  # Copy original image
             processed_image_pil = draw_predictions(processed_image_pil, filtered_output)
-            original_image_pil = draw_predictions(original_image_pil, filtered_output)
 
-            combined_image = side_by_side(original_image_pil, processed_image_pil)
-            combined_image.save(f"output/side_by_side_{batch_idx * 4 + i + 1}.jpg")
+            # Save processed image
+            processed_image_pil.save(f"output/image_{batch_idx * 4 + i + 1}.jpg")
 
-            # Log detections in the console
+            # Log detections
             print(f"Image {batch_idx * 4 + i + 1}:")
             for box, label, score in zip(filtered_output['boxes'], filtered_output['labels'], filtered_output['scores']):
                 label_name = COCO_INSTANCE_CATEGORY_NAMES[label.item()]
