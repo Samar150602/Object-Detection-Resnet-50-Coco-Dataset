@@ -47,7 +47,7 @@ val_dataset_full = CocoDetection(
 
 # Use subsets for faster testing
 random.seed(42)
-subset_percentage = 0.005
+subset_percentage = 0.001
 train_indices = random.sample(range(len(train_dataset_full)), int(len(train_dataset_full) * subset_percentage))
 val_indices = random.sample(range(len(val_dataset_full)), int(len(val_dataset_full) * subset_percentage))
 
@@ -99,6 +99,9 @@ for epoch in range(num_epochs):
     epoch_loss = 0
 
     for batch_idx, (images, targets) in enumerate(train_loader):
+        if len(images) == 0:  # Skip empty batches
+            continue
+
         images = [img.to(device) for img in images]
         processed_targets = []
         for target in targets:
@@ -111,6 +114,9 @@ for epoch in range(num_epochs):
 
         optimizer.zero_grad()
         loss_dict = model(images, processed_targets)
+        if isinstance(loss_dict, list):  # Handle unexpected output format
+            raise ValueError("Model returned an unexpected list instead of a dictionary.")
+
         losses = sum(loss for loss in loss_dict.values())
         losses.backward()
         optimizer.step()
@@ -122,27 +128,49 @@ for epoch in range(num_epochs):
     train_losses.append(epoch_loss / len(train_loader))
     print(f"Epoch {epoch + 1}/{num_epochs}, Training Loss: {epoch_loss:.4f}")
 
-    # Validation loss
-    model.eval()
+    # Validation loss calculation
     val_loss = 0
+    model.eval()  # Ensure the model is in evaluation mode
+
     with torch.no_grad():
-        for images, targets in val_loader:
+        for batch_idx, (images, targets) in enumerate(val_loader):
+            if len(images) == 0:  # Skip empty batches
+                print(f"Skipping empty batch {batch_idx + 1}.")
+                continue
+
             images = [img.to(device) for img in images]
             processed_targets = []
             for target in targets:
                 boxes = torch.tensor([ann['bbox'] for ann in target], dtype=torch.float32).to(device)
                 if boxes.ndim > 1:
-                    boxes[:, 2] += boxes[:, 0]
-                    boxes[:, 3] += boxes[:, 1]
+                    boxes[:, 2] += boxes[:, 0]  # Convert width to x_max
+                    boxes[:, 3] += boxes[:, 1]  # Convert height to y_max
                 labels = torch.tensor([coco_category_map[ann['category_id']] for ann in target], dtype=torch.int64).to(device)
                 processed_targets.append({"boxes": boxes, "labels": labels})
 
+            # Debugging: Ensure targets and images match
+            if len(images) != len(processed_targets):
+                raise ValueError(f"Mismatch: {len(images)} images but {len(processed_targets)} targets.")
+
+            # Temporarily set the model to training mode to compute losses
+            model.train()
             loss_dict = model(images, processed_targets)
+            model.eval()  # Switch back to evaluation mode
+
+            # Debugging: Check the loss dictionary
+            if not isinstance(loss_dict, dict):
+                print(f"Model output (unexpected): {loss_dict}")
+                raise ValueError("Model did not return a dictionary of losses during validation.")
+
+            # Calculate total loss
             losses = sum(loss for loss in loss_dict.values())
             val_loss += losses.item()
 
+    # Append average validation loss
     val_losses.append(val_loss / len(val_loader))
     print(f"Epoch {epoch + 1}/{num_epochs}, Validation Loss: {val_loss:.4f}")
+
+
 
     # Save model checkpoint
     model_save_path = f"model_epoch_{epoch + 1}.pth"
