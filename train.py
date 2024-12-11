@@ -1,9 +1,7 @@
 import torch
 import torchvision
-from torchvision.models.detection import FasterRCNN
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
-from torchvision import transforms
+import torch.nn as nn
+import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset
 from torchvision.datasets import CocoDetection
 import matplotlib.pyplot as plt
@@ -47,7 +45,7 @@ val_dataset_full = CocoDetection(
 
 # Use subsets for faster testing
 random.seed(42)
-subset_percentage = 0.001
+subset_percentage = 0.0001
 train_indices = random.sample(range(len(train_dataset_full)), int(len(train_dataset_full) * subset_percentage))
 val_indices = random.sample(range(len(val_dataset_full)), int(len(val_dataset_full) * subset_percentage))
 
@@ -55,24 +53,6 @@ train_dataset = Subset(train_dataset_full, train_indices)
 val_dataset = Subset(val_dataset_full, val_indices)
 
 print(f"Training dataset size: {len(train_dataset)}, Validation dataset size: {len(val_dataset)}")
-
-# Map COCO category IDs to consecutive indices
-coco_category_map = {cat['id']: i for i, cat in enumerate(train_dataset.dataset.coco.loadCats(train_dataset.dataset.coco.getCatIds()))}
-
-# Define the Faster R-CNN model
-print("Initializing Faster R-CNN model...")
-num_classes = len(coco_category_map) + 1  # Add 1 for background
-model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT)
-in_features = model.roi_heads.box_predictor.cls_score.in_features
-model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-
-# Move model to device
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-model.to(device)
-
-# Optimizer and scheduler
-optimizer = torch.optim.SGD(model.parameters(), lr=0.005, momentum=0.9, weight_decay=0.0005)
-lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
 # Data loader collate function
 def collate_fn(batch):
@@ -87,100 +67,111 @@ def collate_fn(batch):
 train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, collate_fn=collate_fn, num_workers=0)
 val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, collate_fn=collate_fn, num_workers=0)
 
-# Track losses
+# Define a custom object detection model
+class CustomObjectDetectionModel(nn.Module):
+    def __init__(self, num_classes):
+        super(CustomObjectDetectionModel, self).__init__()
+        # Load pre-trained ResNet-50 backbone
+        self.backbone = torchvision.models.resnet50(weights="DEFAULT")
+        self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])  # Remove fully connected layers
+        
+        # Detection heads
+        self.classification_head = nn.Sequential(
+            nn.Conv2d(2048, 1024, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(1024, num_classes, kernel_size=1)  # Class logits
+        )
+        self.regression_head = nn.Sequential(
+            nn.Conv2d(2048, 1024, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(1024, 4, kernel_size=1)  # Bounding box coordinates
+        )
+
+    def forward(self, x):
+        features = self.backbone(x)
+        class_logits = self.classification_head(features)
+        bbox_regressions = self.regression_head(features)
+        return class_logits, bbox_regressions
+
+# Instantiate the model
+num_classes = len(COCO_INSTANCE_CATEGORY_NAMES)
+model = CustomObjectDetectionModel(num_classes=num_classes)
+
+# Move model to device
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+model.to(device)
+
+# Optimizer and loss functions
+optimizer = torch.optim.SGD(model.parameters(), lr=0.005, momentum=0.9, weight_decay=0.0005)
+classification_loss_fn = nn.CrossEntropyLoss()
+bbox_regression_loss_fn = nn.SmoothL1Loss()
+
+# Training and validation loop
+num_epochs = 20
 train_losses = []
 val_losses = []
 
-# Training loop
 print("Starting training...")
-num_epochs = 50
 for epoch in range(num_epochs):
     model.train()
-    epoch_loss = 0
+    epoch_train_loss = 0
 
     for batch_idx, (images, targets) in enumerate(train_loader):
         if len(images) == 0:  # Skip empty batches
             continue
 
-        images = [img.to(device) for img in images]
-        processed_targets = []
-        for target in targets:
-            boxes = torch.tensor([ann['bbox'] for ann in target], dtype=torch.float32).to(device)
-            if boxes.ndim > 1:
-                boxes[:, 2] += boxes[:, 0]  # x_max = x_min + width
-                boxes[:, 3] += boxes[:, 1]  # y_max = y_min + height
-            labels = torch.tensor([coco_category_map[ann['category_id']] for ann in target], dtype=torch.int64).to(device)
-            processed_targets.append({"boxes": boxes, "labels": labels})
+        images = torch.stack([img.to(device) for img in images])
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         optimizer.zero_grad()
-        loss_dict = model(images, processed_targets)
-        if isinstance(loss_dict, list):  # Handle unexpected output format
-            raise ValueError("Model returned an unexpected list instead of a dictionary.")
+        class_logits, bbox_regressions = model(images)
 
-        losses = sum(loss for loss in loss_dict.values())
-        losses.backward()
+        # Calculate classification loss
+        labels = torch.cat([t["labels"] for t in targets], dim=0).to(device)
+        class_loss = classification_loss_fn(class_logits.view(-1, num_classes), labels)
+
+        # Calculate bounding box regression loss
+        gt_boxes = torch.cat([t["boxes"] for t in targets], dim=0).to(device)
+        bbox_loss = bbox_regression_loss_fn(bbox_regressions.view(-1, 4), gt_boxes)
+
+        # Total loss
+        loss = class_loss + bbox_loss
+        loss.backward()
         optimizer.step()
-        epoch_loss += losses.item()
+        epoch_train_loss += loss.item()
 
-        if batch_idx % 10 == 0:
-            print(f"Epoch {epoch + 1}, Batch {batch_idx + 1}/{len(train_loader)}, Loss: {losses.item():.4f}")
+    train_losses.append(epoch_train_loss / len(train_loader))
+    print(f"Epoch {epoch + 1}/{num_epochs}, Training Loss: {epoch_train_loss:.4f}")
 
-    train_losses.append(epoch_loss / len(train_loader))
-    print(f"Epoch {epoch + 1}/{num_epochs}, Training Loss: {epoch_loss:.4f}")
-
-    # Validation loss calculation
-    val_loss = 0
-    model.eval()  # Ensure the model is in evaluation mode
-
+    # Validation loop
+    model.eval()
+    epoch_val_loss = 0
     with torch.no_grad():
         for batch_idx, (images, targets) in enumerate(val_loader):
             if len(images) == 0:  # Skip empty batches
-                print(f"Skipping empty batch {batch_idx + 1}.")
                 continue
 
-            images = [img.to(device) for img in images]
-            processed_targets = []
-            for target in targets:
-                boxes = torch.tensor([ann['bbox'] for ann in target], dtype=torch.float32).to(device)
-                if boxes.ndim > 1:
-                    boxes[:, 2] += boxes[:, 0]  # Convert width to x_max
-                    boxes[:, 3] += boxes[:, 1]  # Convert height to y_max
-                labels = torch.tensor([coco_category_map[ann['category_id']] for ann in target], dtype=torch.int64).to(device)
-                processed_targets.append({"boxes": boxes, "labels": labels})
+            images = torch.stack([img.to(device) for img in images])
+            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-            # Debugging: Ensure targets and images match
-            if len(images) != len(processed_targets):
-                raise ValueError(f"Mismatch: {len(images)} images but {len(processed_targets)} targets.")
+            class_logits, bbox_regressions = model(images)
 
-            # Temporarily set the model to training mode to compute losses
-            model.train()
-            loss_dict = model(images, processed_targets)
-            model.eval()  # Switch back to evaluation mode
+            # Calculate classification loss
+            labels = torch.cat([t["labels"] for t in targets], dim=0).to(device)
+            class_loss = classification_loss_fn(class_logits.view(-1, num_classes), labels)
 
-            # Debugging: Check the loss dictionary
-            if not isinstance(loss_dict, dict):
-                print(f"Model output (unexpected): {loss_dict}")
-                raise ValueError("Model did not return a dictionary of losses during validation.")
+            # Calculate bounding box regression loss
+            gt_boxes = torch.cat([t["boxes"] for t in targets], dim=0).to(device)
+            bbox_loss = bbox_regression_loss_fn(bbox_regressions.view(-1, 4), gt_boxes)
 
-            # Calculate total loss
-            losses = sum(loss for loss in loss_dict.values())
-            val_loss += losses.item()
+            # Total loss
+            loss = class_loss + bbox_loss
+            epoch_val_loss += loss.item()
 
-    # Append average validation loss
-    val_losses.append(val_loss / len(val_loader))
-    print(f"Epoch {epoch + 1}/{num_epochs}, Validation Loss: {val_loss:.4f}")
+    val_losses.append(epoch_val_loss / len(val_loader))
+    print(f"Epoch {epoch + 1}/{num_epochs}, Validation Loss: {epoch_val_loss:.4f}")
 
-
-
-    # Save model checkpoint
-    model_save_path = f"model_epoch_{epoch + 1}.pth"
-    torch.save(model.state_dict(), model_save_path)
-    print(f"Model saved after epoch {epoch + 1} at {model_save_path}")
-
-    # Step the learning rate scheduler
-    lr_scheduler.step()
-
-# Plot training and validation loss
+# Plot training and validation losses
 plt.figure(figsize=(10, 5))
 plt.plot(range(1, num_epochs + 1), train_losses, label='Training Loss')
 plt.plot(range(1, num_epochs + 1), val_losses, label='Validation Loss')
